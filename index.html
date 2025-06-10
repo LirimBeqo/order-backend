@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="sq">
+<head>
+<meta charset="utf-8"/>
+<title>Regjistro Porosi</title>
+<meta content="width=device-width, initial-scale=1" name="viewport"/>
+<style>
+  body { font-family: Arial, sans-serif; background: #fff; margin: 0; }
+  header { background: #b30000; color: #fff; padding: 1em; text-align: center; }
+  .container { max-width: 800px; margin: auto; padding: 20px; }
+  input, textarea, select, button { width:100%; margin-top:10px; padding:10px; box-sizing:border-box; font-size:16px; }
+  button { background:#b30000; color:#fff; border:none; cursor:pointer; }
+  button:hover { background:#800000; }
+  .product-item { padding:10px; border:1px solid #ccc; border-radius: 5px; margin-bottom: 10px; background: #fdfdfd; position: relative; }
+  .delete-btn { position:absolute; right:10px; top:10px; background:transparent; border:none; color:red; font-size:16px; cursor:pointer; }
+  #qrContainer { margin-top:20px; }
+  .qrcode { text-align:center; margin:20px 0; }
+  .qr-link, .qr-id { text-align:center; font-size:0.9em; color:#555; word-break:break-word; }
+  #loginForm, #mainForm { display: none; }
+</style>
+</head>
+<body>
+<div style="background:#fff; text-align:center; padding:20px 0;">
+<img alt="PC STORE Logo" src="logo-1.png" style="max-height:80px; filter: drop-shadow(0 2px 3px rgba(0,0,0,0.3));"/>
+</div>
+<header><h1>Regjistro Porosi</h1></header>
+<div class="container">
+  <div id="loginForm">
+    <h3>Kyçu për të vazhduar</h3>
+    <input id="email" placeholder="Email" type="email"/>
+    <input id="password" placeholder="Fjalëkalimi" type="password"/>
+    <button onclick="login()">Kyçu</button>
+  </div>
+  <div id="mainForm">
+    <h3>Klienti</h3>
+    <input id="clientName" placeholder="Emri i klientit/subjektit"/>
+    <hr/>
+    <h3>Shto Produkt</h3>
+    <input id="model" placeholder="Modeli"/>
+    <input id="partNumber" placeholder="Part Number"/>
+    <input id="price" placeholder="Çmimi (EUR)" type="number" step="0.01"/>
+    <textarea id="description" placeholder="Përshkrimi i pajisjes"></textarea>
+    <textarea id="providedItems" placeholder="Produktet e sjella (p.sh. RAM, SSD)"></textarea>
+    <textarea id="requests" placeholder="Kërkesat e dyqanit"></textarea>
+    <select id="urgjenca">
+      <option value="normal">Normal</option>
+      <option value="urgent">Urgjent</option>
+      <option value="testim">Testim</option>
+    </select>
+    <input id="quantity" min="1" placeholder="Sasia" type="number" value="1"/>
+    <button onclick="addProduct()">Shto Produkt(et)</button>
+    <div id="productList"></div>
+    <button onclick="saveOrder()">Regjistro Porosinë dhe Gjenero QR</button>
+    <button onclick="logout()" style="background:#444; margin-top:20px;">Dil</button>
+    <div id="qrContainer"></div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getFirestore, collection, addDoc, doc, setDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyD1o_9XH3tbWxR_cpmk7kWszciSY9No6-c",
+  authDomain: "menaxhimiservisit-36879.firebaseapp.com",
+  projectId: "menaxhimiservisit-36879",
+  storageBucket: "menaxhimiservisit-36879.firebasestorage.app",
+  messagingSenderId: "23725220485",
+  appId: "1:23725220485:web:f33bebdf365542608dbfec"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
+
+let products = [];
+let orderAlreadySaved = false;
+
+onAuthStateChanged(auth, user => {
+  document.getElementById("loginForm").style.display = user ? "none" : "block";
+  document.getElementById("mainForm").style.display = user ? "block" : "none";
+
+  const draft = localStorage.getItem("draftOrder");
+  if (user && draft) {
+    const parsed = JSON.parse(draft);
+    document.getElementById("clientName").value = parsed.client;
+    products = parsed.products || [];
+    renderProducts();
+    localStorage.removeItem("draftOrder");
+  }
+});
+
+window.login = async () => {
+  const email = document.getElementById("email").value.trim();
+  const password = document.getElementById("password").value.trim();
+  try {
+    await signInWithEmailAndPassword(auth, email, password);
+  } catch (err) {
+    alert("Kyçja dështoi. Kontrollo emailin ose fjalëkalimin.");
+  }
+};
+
+window.logout = () => {
+  signOut(auth).then(() => location.reload());
+};
+
+function isValid(str) {
+  return str.trim().length > 0;
+}
+
+window.addProduct = () => {
+  const model = document.getElementById("model").value.trim();
+  const partNumber = document.getElementById("partNumber").value.trim();
+  const description = document.getElementById("description").value.trim();
+  const requests = document.getElementById("requests").value.trim();
+  const urgjenca = document.getElementById("urgjenca").value;
+  const providedItems = document.getElementById("providedItems").value.trim();
+  const price = parseFloat(document.getElementById("price").value);
+  const quantity = parseInt(document.getElementById("quantity").value);
+
+  if (![model, partNumber, description, requests].every(isValid) || isNaN(quantity) || quantity < 1 || isNaN(price)) {
+    alert("Plotësoni të gjitha fushat siç duhet.");
+    return;
+  }
+
+  const duplicate = products.some(p =>
+    p.model === model &&
+    p.partNumber === partNumber &&
+    p.description === description &&
+    p.requests === requests
+  );
+
+  if (duplicate && !confirm("Ky produkt është i ngjashëm me një të mëparshëm. Dëshiron ta shtosh sërish?")) return;
+
+  for (let i = 0; i < quantity; i++) {
+    products.push({
+      id: crypto.randomUUID(),
+      model,
+      partNumber,
+      description,
+      requests,
+      urgjenca,
+      providedItems,
+      price,
+      status: "pending"
+    });
+  }
+
+  ["model", "partNumber", "description", "requests", "providedItems", "price", "quantity"].forEach(id => {
+    document.getElementById(id).value = id === 'quantity' ? '1' : "";
+  });
+
+  renderProducts();
+};
+
+function renderProducts() {
+  const list = document.getElementById("productList");
+  list.innerHTML = "<h4>Produktet e Shtuar:</h4>";
+  products.forEach((p, i) => {
+    const div = document.createElement("div");
+    div.className = "product-item";
+    div.innerHTML = `<strong>${i + 1}. ${p.model}</strong> (${p.partNumber})<br>
+      ${p.description}<br>
+      <em>${p.requests}</em><br>
+      <strong>Urgjenca:</strong> ${p.urgjenca}<br>
+      <strong>Produktet e sjella:</strong> ${p.providedItems}<br>
+      <strong>Çmimi:</strong> ${p.price.toFixed(2)} EUR`;
+    const btn = document.createElement("button");
+    btn.textContent = "🗑";
+    btn.className = "delete-btn";
+    btn.onclick = () => {
+      products.splice(i, 1);
+      renderProducts();
+    };
+    div.appendChild(btn);
+    list.appendChild(div);
+  });
+}
+
+// Funksioni i modifikuar për të ruajtur dhe për të dërguar në backend-in Node.js
+window.saveOrder = async () => {
+  const client = document.getElementById("clientName").value.trim();
+  const user = auth.currentUser;
+
+  if (!user || !client || products.length === 0) {
+    alert("Plotësoni të dhënat dhe kyçuni.");
+    return;
+  }
+  if (!navigator.onLine) {
+    alert("Ju nuk jeni të lidhur me internetin!");
+    return;
+  }
+  if (orderAlreadySaved) return;
+  orderAlreadySaved = true;
+
+  try {
+    localStorage.setItem("draftOrder", JSON.stringify({ client, products }));
+
+    // Ruaj në Firebase
+    const orderRef = await addDoc(collection(db, "orders"), {
+      client,
+      createdAt: new Date().toISOString(),
+      createdBy: user.email
+    });
+
+    for (const product of products) {
+      await setDoc(doc(db, "orders", orderRef.id, "porosit", product.id), product);
+    }
+
+    generateQRCodes(orderRef.id);
+    localStorage.removeItem("draftOrder");
+
+    // Dërgo në backend-in Node.js
+    const backendURL = "https://YOUR-HEROKU-APP.herokuapp.com/notify"; // Ndrysho me URL tënde
+
+    const response = await fetch(backendURL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client, products }),
+    });
+
+    const result = await response.json();
+
+    if (result.success) {
+      alert("Porosia u dërgua me sukses edhe në Teams!");
+    } else {
+      alert("Porosia u regjistrua, por dërgimi në Teams dështoi.");
+      console.error(result.error);
+    }
+
+  } catch (err) {
+    console.error(err);
+    alert("Gabim gjatë ruajtjes.");
+  }
+};
+
+function generateQRCodes(orderId) {
+  const container = document.getElementById("qrContainer");
+  container.innerHTML = "<h3>QR Codes të Gjeneruara</h3>";
+  products.forEach(p => {
+    const div = document.createElement("div");
+    div.className = "qrcode";
+    const qrDiv = document.createElement("div");
+    div.appendChild(qrDiv);
+    new QRCode(qrDiv, {
+      text: `${location.origin}/?orderId=${orderId}&productId=${p.id}`,
+      width: 150,
+      height: 150,
+      colorDark: "#b30000",
+      colorLight: "#fff",
+    });
+    const link = document.createElement("div");
+    link.className = "qr-link";
+    link.textContent = `${location.origin}/?orderId=${orderId}&productId=${p.id}`;
+    div.appendChild(link);
+
+    const idText = document.createElement("div");
+    idText.className = "qr-id";
+    idText.textContent = `ID: ${p.id}`;
+    div.appendChild(idText);
+
+    container.appendChild(div);
+  });
+}
+</script>
+</body>
+</html>
